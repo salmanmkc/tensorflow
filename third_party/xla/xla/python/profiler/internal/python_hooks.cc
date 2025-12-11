@@ -411,11 +411,29 @@ void PythonHookContext::ProfileFast(PyFrameObject* frame, int what,
 /*static*/ void PythonHookContext::EnableTraceMe(bool enable) {
   const char* kModuleName =
       "tensorflow.python.profiler.trace";
-  try {
-    auto trace_module = py::module::import(kModuleName);
-    trace_module.attr("enabled") = py::bool_(enable);
-  } catch (const py::error_already_set& e) {
-    LOG(INFO) << "Can't import " << kModuleName;
+
+  // GIL is held by the caller (PythonHookContext::Start or ::Stop).
+  PyObject* module = PyImport_ImportModule(kModuleName);
+
+  if (module == nullptr) {
+    if (PyErr_Occurred() && PyErr_ExceptionMatches(PyExc_ModuleNotFoundError)) {
+      // Normal case if TF is not installed.
+      LOG(INFO) << "TensorFlow profiler trace module not found: "
+                << kModuleName;
+    } else {
+      LOG(WARNING) << "Error importing optional module " << kModuleName;
+    }
+    PyErr_Clear();
+  } else {
+    // Import successful
+    PyObject* py_enable = enable ? Py_True : Py_False;
+    if (PyObject_SetAttrString(module, "enabled", py_enable) < 0) {
+      LOG(WARNING) << "Failed to set 'enabled' on module " << kModuleName;
+      if (PyErr_Occurred()) {
+        PyErr_Clear();
+      }
+    }
+    Py_DECREF(module);
   }
 }
 
