@@ -94,6 +94,22 @@ class TransposePlan {
     kF64ToEf57 = 1,
   };
 
+  // Requested contiguity of chunks.
+  enum class ChunkContiguity {
+    // We don't care about contiguity (default).
+    kNone,
+
+    // We want input chunks to be contiguous. Note that input contiguity is best
+    // effort if there are input strides. We do not guarantee in this case that
+    // the input chunks are non-overlapping. If there are no input strides, we
+    // guarantee that the input chunks are non-overlapping.
+    kInput,
+
+    // We want output chunks to be contiguous. Output contiguity is guaranteed,
+    // since we do not support arbitrary output strides.
+    kOutput,
+  };
+
   struct Options {
     size_t elem_size_in_bytes;
     absl::Span<int64_t const> dims;
@@ -102,7 +118,14 @@ class TransposePlan {
     std::optional<Striding> input_striding = std::nullopt;
     std::optional<Tiling> output_tiling = std::nullopt;
     Transformation transformation = Transformation::kNone;
+
+    // Requested number of chunks (threads). We will attempt to create
+    // approximately this many chunks. The actual number of chunks may be
+    // smaller or larger.
+    // TODO(phawkins): rename to num_chunks.
     int num_threads = 1;
+
+    ChunkContiguity chunk_contiguity = ChunkContiguity::kNone;
 
     // DEPRECATED: Use input_tiling or input_striding instead.
     // This field is only present for backward compatibility.
@@ -123,6 +146,33 @@ class TransposePlan {
   void Execute(const void* a, void* b,
                std::optional<absl::FunctionRef<void(std::function<void(void)>)>>
                    schedule_work = std::nullopt) const;
+
+  // Executes a single chunk of the transposition. To perform a complete
+  // transposition, call ExecuteChunk for each chunk ID from 0 to Parallelism()
+  // - 1. It is legal to call ExecuteChunk for independent chunks in parallel.
+  // This is useful for callers that want to manage their own threading.
+  // If input_is_global, `a` points to the base address of the input array,
+  // exactly as Execute() accepts.
+  // Otherwise, `a` points to the a chunk of that array, starting at offset
+  // InputChunkOffsetBytes() and of size InputChunkSizeBytes(). Note that in the
+  // presence of negative strides, this may be a negative offset.
+  //
+  // The same applies to `b` and `output_is_global`.
+  void ExecuteChunk(int chunk_id, const void* a, void* b, bool input_is_global,
+                    bool output_is_global) const;
+
+  int64_t InputChunkOffsetBytes(int chunk_id) const {
+    return input_chunk_offset_bytes_[chunk_id];
+  }
+  int64_t InputChunkSizeBytes(int chunk_id) const {
+    return input_chunk_size_bytes_[chunk_id];
+  }
+  int64_t OutputChunkOffsetBytes(int chunk_id) const {
+    return output_chunk_offset_bytes_[chunk_id];
+  }
+  int64_t OutputChunkSizeBytes(int chunk_id) const {
+    return output_chunk_size_bytes_[chunk_id];
+  }
 
   // Returns a human-readable description of the plan.
   std::string ToString() const;
@@ -175,6 +225,20 @@ class TransposePlan {
     // Number of parallel threads to use for this loop.
     int64_t parallelism;
 
+    // Iteration bounds for this chunk. Initially [0, full_iterations).
+    // After chunk splitting, each chunk's loops have narrowed bounds.
+    int64_t start = 0;  // Inclusive start of iteration range
+    int64_t end = 0;    // Exclusive end of iteration range
+
+    // Is this loop over a tiled dimension where the iteration space touches
+    // the partial tile at the end?
+    bool has_partial_tile = false;
+
+    // Is this loop which should remain contiguous to ensure the requested
+    // chunk contiguity?
+    bool is_contiguous = false;
+
+    std::string ToString() const;
     bool operator==(const Loop& other) const;
   };
 
@@ -186,11 +250,29 @@ class TransposePlan {
   // Performs plan initialization that cannot fail.
   void Initialize();
 
-  void BuildPlanNodes(int thread_id, std::vector<Node>& output_nodes);
+  void BuildPlanNodes(int chunk_id, std::vector<Node>& nodes);
 
-  // Chooses a parallelism for each loop. Returns the total number of parallel
-  // work units.
-  int ChooseParallelizationStrategy();
+  // Chooses a parallelism for each loop. Returns the number of separate chunks
+  // in the plan, and populates the `parallelism` field of each loop.
+  int ChooseParallelizationStrategy(std::vector<Loop>& loop_order);
+
+  // Identifies the innermost loops that should remain contiguous to achieve
+  // the requested chunk contiguity.
+  void IdentifyContiguousLoops(std::vector<Loop>& loop_order) const;
+
+  // Reorders loops to optimize for locality.
+  void ChooseLoopOrder(std::vector<Loop>& loop_order) const;
+
+  // Creates per-chunk loop vectors by splitting loop_order_ into per-chunk
+  // loops. Returns a vector of loop vectors, one per chunk. Each chunk's
+  // loops have their start/end bounds narrowed to represent that chunk's work.
+  static void PartitionLoops(
+      int num_dims, int num_chunks, const std::vector<Loop>& loop_order,
+      std::vector<std::vector<TransposePlan::Loop>>& result,
+      std::vector<int64_t>& input_chunk_iteration_offsets,
+      std::vector<int64_t>& output_chunk_iteration_offsets);
+
+  void ComputeChunkSizes();
 
   // The signature of ExecuteTyped uses char* pointers because we perform
   // address calculations with strides in bytes; the strides need not be
@@ -198,8 +280,8 @@ class TransposePlan {
   template <typename T, Transformation transformation>
   void ExecuteTyped(const char* a, char* b, absl::Span<Node const> nodes) const;
 
-  // Number of threads requested.
-  int num_threads_requested_ = 1;
+  // Number of chunks requested.
+  int num_chunks_requested_ = 1;
 
   // Size of each element in bytes.
   int64_t elem_size_in_bytes_;
@@ -237,9 +319,27 @@ class TransposePlan {
   bool a_is_tiled_;
   bool b_is_tiled_;
 
-  // Order to traverse dimensions, from slowest-varying to fastest-varying.
+  // Per-chunk loop nests. Each loop nest has its own start/end bounds
+  // representing one chunk of the work.
+  std::vector<std::vector<Loop>> chunk_loops_;
 
-  std::vector<Loop> loop_order_;
+  // Per-chunk byte offsets and sizes into the input and output arrays.
+  // `offset_bytes` are the physical offsets of the start of each chunk (minimum
+  // byte addresses touched by that chunk) relative to the logical start
+  // (index 0) of the array. Note: if the input strides are negative, these
+  // offsets can also be negative.
+  std::vector<int64_t> input_chunk_offset_bytes_;
+  std::vector<int64_t> output_chunk_offset_bytes_;
+
+  // `iteration_offsets` are the byte offsets of the first logical element of
+  // each chunk's iteration space, relative to the physical start of that chunk
+  // (i.e. relative to `input_chunk_offset_bytes_`). These are non zero for
+  // negative strides, where the chunk may start before the logical start of the
+  // array.
+  std::vector<int64_t> input_chunk_iteration_offsets_;
+  std::vector<int64_t> output_chunk_iteration_offsets_;
+  std::vector<int64_t> input_chunk_size_bytes_;
+  std::vector<int64_t> output_chunk_size_bytes_;
 
   // Root nodes of the plan, i.e., pointing to the outermost loops in the loop
   // nest. The outer vector is indexed on the thread ID.
@@ -269,6 +369,8 @@ class TransposePlan {
   //     bound transformation, and
   // (b) it allows us to support non-trivial striding.
   Transformation transformation_;
+
+  ChunkContiguity chunk_contiguity_;
 
   // Size of the per-thread scratch buffer. 0 means "no scratch buffer required"
   int64_t scratch_size_ = 0;
