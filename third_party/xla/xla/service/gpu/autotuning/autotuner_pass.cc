@@ -61,15 +61,11 @@ AutotuneConfig GetAutotuneConfig(const DebugOptions& debug_options,
   autotune_config.dump_logs_to = debug_options.xla_gpu_dump_autotune_logs_to();
   autotune_config.exclude_cublas_config =
       !debug_options.xla_gpu_cublas_fallback();
-  autotune_config.select_first_config =
+  autotune_config.use_default_config =
       debug_options.xla_gpu_deterministic_ops() ||
       debug_options.xla_gpu_exclude_nondeterministic_ops() ||
-      debug_options.xla_gpu_autotune_level() == 0;
+      debug_options.xla_gpu_autotune_level() == 0 || is_deviceless;
 
-  if (is_deviceless) {
-    // If we are running on a deviceless target, we want to use default configs.
-    autotune_config.use_default_config = true;
-  }
   autotune_config.optimize_scratch_bytes = optimize_scratch_bytes;
 
   autotune_config.expect_all_instructions_in_cache =
@@ -107,6 +103,14 @@ absl::StatusOr<std::unique_ptr<AutotunerPass>> AutotunerPass::Create(
                                    GetProfileOptions(debug_options), allocator);
   }
 
+  if (debug_options.xla_gpu_experimental_autotuner_cache_dir().empty()) {
+    VLOG(2) << "Not using LegacyCache.";
+  } else {
+    VLOG(2) << "Using LegacyCache with cache dir: "
+            << debug_options.xla_gpu_experimental_autotuner_cache_dir()
+            << " and cache mode: "
+            << debug_options.xla_gpu_experimental_autotune_cache_mode();
+  }
   std::unique_ptr<AutotunerCacheInterface> cache =
       std::make_unique<LegacyCache>(
           debug_options.xla_gpu_experimental_autotuner_cache_dir(),
@@ -129,7 +133,11 @@ absl::StatusOr<bool> AutotunerPass::RunImpl(
 
   bool shard_autotuning =
       enable_sharding_ && key_value_store_.process_count > 1;
+  LOG(INFO) << "enable_sharding: " << enable_sharding_;
+  LOG(INFO) << "key_value_store_.process_count: "
+            << key_value_store_.process_count;
   if (shard_autotuning) {
+    VLOG(2) << "Running sharded autotuning.";
     TF_RETURN_IF_ERROR(
         autotuner_->Autotune(module, should_autotune_, key_value_store_));
   } else {

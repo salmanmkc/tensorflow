@@ -622,6 +622,9 @@ message DebugOptions {
   // up to the HLO optimization stage, before Thunk generation.
   optional bool xla_gpu_experimental_aot_compiled_thunks = 435;
 
+  // List of autotuner backends to enable. If empty, all backends are enabled.
+  repeated string xla_gpu_experimental_autotune_backends = 441;
+
   // Specifies the behavior of per kernel autotuning cache.
   optional AutotuneCacheMode xla_gpu_experimental_autotune_cache_mode = 324;
 

@@ -610,6 +610,7 @@ absl::StatusOr<PerDeviceLiteralVecType> RunInternal(
           running_options.recreate_profiler_session_between_repeats ||
           is_last_repeat;
       if (has_active_profiler_session && upload_active_profiler_session) {
+        XLA_SCOPED_LOGGING_TIMER("FunctionalHloRunner::XProfUpload");
         running_options.profiler->UploadSession();
         has_active_profiler_session = false;
       }
@@ -1049,6 +1050,7 @@ absl::StatusOr<CompileOptions> CreateCompileOptions(
   build_options.set_num_partitions(replicas_and_partitions.partitions);
   build_options.set_process_index(task_id);
   build_options.set_process_count(num_nodes);
+  LOG(INFO) << "CreateCompileOptions: set process_count to " << num_nodes;
   build_options.set_key_value_store(kv_store);
   if (raw_options.spmd_mode == SpmdMode::kUseSpmdPartitioning ||
       raw_options.spmd_mode == SpmdMode::kUseShardyPartitioning) {

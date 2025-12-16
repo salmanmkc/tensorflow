@@ -353,11 +353,9 @@ absl::StatusOr<Autotuner::Config> Autotuner::TuneBestConfig(
   VLOG(1) << "Successfully compiled " << executable_candidates.size()
           << " configs out of " << supported_configs.size() << " configs.";
 
-  bool skip_profiling =
-      executable_candidates.size() == 1 || autotune_config_.select_first_config;
+  bool skip_profiling = executable_candidates.size() == 1;
   if (skip_profiling) {
-    VLOG(1) << "Skipping profiling and using the "
-            << (autotune_config_.select_first_config ? "first" : "only")
+    VLOG(1) << "Skipping profiling and using the only"
             << " config: " << executable_candidates[0].config.ToString();
     return std::move(executable_candidates[0].config);
   }
