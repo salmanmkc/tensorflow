@@ -17,6 +17,9 @@ limitations under the License.
 #include <memory>
 #include <utility>
 #include <vector>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 #include "tensorflow/core/common_runtime/input_colocation_exemption_registry.h"
 #include "tensorflow/core/data/captured_function.h"
@@ -194,8 +197,33 @@ class GeneratorDatasetOp::Dataset : public DatasetBase {
   const std::vector<PartialTensorShape> output_shapes_;
 };
 
+// PATCH: Fix for severe memory leak in Python 3.11+ (GitHub Issue #65675).
+// Python 3.11's allocation pattern causes glibc to retain memory
+// unnecessarily during generator iteration. Setting M_TRIM_THRESHOLD to 1MB
+// prevents OOM crashes.
+void ApplyPython311MemoryPatch() {
+#ifdef __GLIBC__
+  // M_TRIM_THRESHOLD: Release memory to the OS when it exceeds 128KB.
+  // M_MMAP_THRESHOLD: 128KB is default, 0 means "always mmap"
+  int result_trim = mallopt(M_TRIM_THRESHOLD, 128 * 1024);
+  int result_mmap = mallopt(M_MMAP_THRESHOLD, 128 * 1024);
+
+  if (result_trim != 1 || result_mmap != 1) {
+    LOG(WARNING) << "Cannot set mallopt to mitigate memory leak in Python 3.11";
+  } else {
+    LOG(INFO) << "Memory patch applied: M_TRIM_THRESHOLD=0 was set.";
+  }
+#endif
+}
+
 GeneratorDatasetOp::GeneratorDatasetOp(OpKernelConstruction* ctx)
     : DatasetOpKernel(ctx) {
+  static const bool memory_patch_applied = [] {
+    ApplyPython311MemoryPatch();
+    return true;
+  }();
+  (void)memory_patch_applied;  // Silence unused variable warning.
+
   OP_REQUIRES_OK(ctx, FunctionMetadata::Create(ctx, kInitFunc, /*params=*/{},
                                                &init_func_metadata_));
   OP_REQUIRES_OK(ctx, FunctionMetadata::Create(ctx, kNextFunc, /*params=*/{},
