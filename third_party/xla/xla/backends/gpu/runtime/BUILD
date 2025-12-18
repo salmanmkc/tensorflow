@@ -1513,6 +1513,7 @@ cc_library(
         "//xla/core/collectives:communicator",
         "//xla/core/collectives:rank_id",
         "//xla/hlo/ir:hlo",
+        "//xla/service:buffer_assignment",
         "//xla/service:rendezvous",
         "//xla/service/gpu/transforms/collectives:collective_ops_utils",
         "//xla/stream_executor:device_address",
@@ -1537,6 +1538,21 @@ cc_library(
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:span",
         "@local_tsl//tsl/platform:casts",
+    ],
+)
+
+xla_cc_test(
+    name = "ragged_all_to_all_thunk_test",
+    srcs = ["ragged_all_to_all_thunk_test.cc"],
+    deps = [
+        ":collective_thunk",
+        ":ragged_all_to_all_thunk",
+        ":thunk",
+        ":thunk_proto_cc",
+        "//xla/service:buffer_assignment",
+        "//xla/tsl/util/proto:parse_text_proto",
+        "//xla/tsl/util/proto:proto_matchers",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -2924,6 +2940,7 @@ cc_library(
         ":memset_thunk",
         ":norm_thunk",
         ":outfeed_thunk",
+        ":ragged_all_to_all_thunk",
         ":replica_id_thunk",
         ":sequential_thunk",
         ":thunk",
