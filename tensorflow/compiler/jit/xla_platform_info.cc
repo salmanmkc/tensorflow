@@ -251,12 +251,13 @@ absl::Status BuildXlaDeviceCompiler(DeviceBase* device,
   }
   auto platform =
       se::PlatformManager::PlatformWithId(platform_info.platform_id());
+
   if (!platform.ok()) {
     return platform.status();
   }
 
   absl::StatusOr<std::unique_ptr<xla::Compiler>> compiler_for_platform =
-      xla::Compiler::GetForPlatform(platform.value());
+      xla::Compiler::GetForPlatform(platform.value()->id());
   if (!compiler_for_platform.ok()) {
     // In some rare cases (usually in unit tests with very small clusters) we
     // may end up transforming an XLA cluster with at least one GPU operation
@@ -270,9 +271,13 @@ absl::Status BuildXlaDeviceCompiler(DeviceBase* device,
     // the situation for us.
     const absl::Status& status = compiler_for_platform.status();
     if (status.code() == error::NOT_FOUND) {
+      std::string error_message = absl::StrFormat(
+          "could not find registered compiler for platform %s -- was support "
+          "for that platform linked in?",
+          platform.value()->Name());
       return errors::Unimplemented("Could not find compiler for platform ",
                                    platform.value()->Name(), ": ",
-                                   status.ToString());
+                                   error_message);
     }
   }
 
